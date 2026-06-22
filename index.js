@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors')
 const { db_connect } = require('./db/db')
 const planRoutes = require('./routes/plan.route');
+const imageRoutes = require('./routes/image.route');
 
 
 const app = express();
@@ -32,6 +33,7 @@ app.get('/', (req, res) => {
 
 
 app.use('/api', planRoutes)
+app.use('/api/images', imageRoutes)
 
 // Start the server
 app.listen(PORT, () => {
