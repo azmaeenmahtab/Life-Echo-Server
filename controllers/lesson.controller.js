@@ -22,6 +22,24 @@ const createLesson = async (req, res) => {
   }
 };
 
+const getPublicLessons = async (req, res) => {
+  try {
+    const lessons = await lessonService.getPublicLessons(req.query);
+    return res.status(200).json({
+      message: 'Public lessons fetched successfully',
+      count: lessons.length,
+      lessons,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? 'Error fetching lessons' : error.message,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createLesson,
+  getPublicLessons,
 };

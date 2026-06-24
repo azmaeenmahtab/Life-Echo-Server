@@ -61,7 +61,7 @@ const uploadToImgbb = async (file) => {
     formData.append("name", file.originalname.split(".")[0]);
   }
 
-  console.log("image upload form data (url search Param) ", formData);
+  //   console.log("image upload form data (url search Param) ", formData);
 
   let response;
   try {

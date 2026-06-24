@@ -1,7 +1,9 @@
+const { ObjectId } = require("mongodb");
 const { client } = require("../db/db");
 
 const DB_NAME = "life-echo-db";
 const LESSONS_COLLECTION = "lessons";
+const USERS_COLLECTION = "user";
 
 const ALLOWED_CATEGORIES = new Set([
   "personal-growth",
@@ -88,6 +90,113 @@ const createLesson = async (rawPayload) => {
   return { _id: result.insertedId, ...document };
 };
 
+/**
+ * Normalises and validates the public-list query params.
+ * Returns a Mongo `filter` object and a `sort` spec, or throws httpError(400).
+ */
+const buildPublicLessonQuery = (query = {}) => {
+  const filter = {};
+
+  // Category: single value, must be one of the allowed slugs.
+  if (query.category != null && query.category !== "") {
+    const category = query.category.toString().trim();
+    if (!ALLOWED_CATEGORIES.has(category)) {
+      throw httpError(400, `Invalid category: ${category}`);
+    }
+    filter.category = category;
+  }
+
+  // Tone: single value, must be one of the allowed tones.
+  if (query.tone != null && query.tone !== "") {
+    const tone = query.tone.toString().trim();
+    if (!ALLOWED_TONES.has(tone)) {
+      throw httpError(400, `Invalid emotional tone: ${tone}`);
+    }
+    filter.emotionalTone = tone;
+  }
+
+  // Keyword: case-insensitive partial match across title + story.
+  if (query.keywords != null && query.keywords !== "") {
+    const keywords = query.keywords.toString().trim();
+    if (keywords.length > 0) {
+      // Escape regex metacharacters so user input is treated literally.
+      const escaped = keywords.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
+      filter.$or = [{ title: regex }, { story: regex }];
+    }
+  }
+
+  // Only surface public, free lessons on the public route.
+
+  // filter.accessLevel = "free"; 
+
+  // Sort: "mostsaved" (descending saves count) or "newest" (default).
+  let sort = { createdAt: -1 };
+  const sortby = (query.sortby ?? "newest").toString().trim().toLowerCase();
+  if (sortby === "mostsaved") {
+    sort = { savesCount: -1, createdAt: -1 };
+  } else if (sortby !== "newest") {
+    throw httpError(400, `Invalid sortby: ${sortby}`);
+  }
+
+  return { filter, sort };
+};
+
+/**
+ * Fetches public lessons, applying the optional category / tone / keyword
+ * filters and the chosen sort. Joins the author document from the `user`
+ * collection so each lesson ships with the creator's name and profile pic.
+ * Returns an array (empty on no matches).
+ */
+const getPublicLessons = async (query = {}) => {
+  const { filter, sort } = buildPublicLessonQuery(query);
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  // Convert string `userId`s on lessons into ObjectIds for the join.
+  // Only valid ObjectIds are forwarded; orphans are skipped silently.
+  const pipeline = [
+    { $match: filter },
+    {
+      $addFields: {
+        userObjectId: {
+          $cond: [
+            { $eq: [{ $type: "$userId" }, "string"] },
+            { $toObjectId: "$userId" },
+            "$userId",
+          ],
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: USERS_COLLECTION,
+        localField: "userObjectId",
+        foreignField: "_id",
+        as: "creator",
+      },
+    },
+    {
+      $unwind: {
+        path: "$creator",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $addFields: {
+        creatorName: { $ifNull: ["$creator.name", null] },
+        creatorProfilePic: { $ifNull: ["$creator.image", null] },
+      },
+    },
+    { $project: { creator: 0, userObjectId: 0 } },
+    { $sort: sort },
+  ];
+
+  const docs = await lessons.aggregate(pipeline).toArray();
+  return docs;
+};
+
 module.exports = {
   createLesson,
+  getPublicLessons,
+  buildPublicLessonQuery,
 };
