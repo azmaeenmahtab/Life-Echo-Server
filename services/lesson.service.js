@@ -183,6 +183,7 @@ const getPublicLessons = async (query = {}) => {
     },
     {
       $addFields: {
+        creatorId: { $ifNull: ["$creator._id", null] },
         creatorName: { $ifNull: ["$creator.name", null] },
         creatorProfilePic: { $ifNull: ["$creator.image", null] },
       },
@@ -227,6 +228,7 @@ const getLessonByIdService = async (lessonId) => {
     },
     {
       $addFields: {
+        creatorId: { $ifNull: ["$creator._id", null] },
         creatorName: { $ifNull: ["$creator.name", null] },
         creatorProfilePic: { $ifNull: ["$creator.image", null] },
       },
