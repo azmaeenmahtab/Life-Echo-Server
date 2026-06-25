@@ -128,7 +128,7 @@ const buildPublicLessonQuery = (query = {}) => {
 
   // Only surface public, free lessons on the public route.
 
-  // filter.accessLevel = "free"; 
+  // filter.accessLevel = "free";
 
   // Sort: "mostsaved" (descending saves count) or "newest" (default).
   let sort = { createdAt: -1 };
@@ -195,8 +195,51 @@ const getPublicLessons = async (query = {}) => {
   return docs;
 };
 
+const getLessonByIdService = async (lessonId) => {
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const pipeline = [
+    { $match: { _id: new ObjectId(lessonId) } },
+    {
+      $addFields: {
+        userObjectId: {
+          $cond: [
+            { $eq: [{ $type: "$userId" }, "string"] },
+            { $toObjectId: "$userId" },
+            "$userId",
+          ],
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: USERS_COLLECTION,
+        localField: "userObjectId",
+        foreignField: "_id",
+        as: "creator",
+      },
+    },
+    {
+      $unwind: {
+        path: "$creator",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $addFields: {
+        creatorName: { $ifNull: ["$creator.name", null] },
+        creatorProfilePic: { $ifNull: ["$creator.image", null] },
+      },
+    },
+    { $project: { creator: 0, userObjectId: 0 } },
+  ];
+
+  const docs = await lessons.aggregate(pipeline).toArray();
+  return docs[0] || null;
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
-  buildPublicLessonQuery,
+  getLessonByIdService,
 };
