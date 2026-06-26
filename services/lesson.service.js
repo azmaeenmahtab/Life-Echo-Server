@@ -240,8 +240,85 @@ const getLessonByIdService = async (lessonId) => {
   return docs[0] || null;
 };
 
+/**
+ * Toggles the current user's like on a lesson.
+ *
+ * Data model:
+ *   - lessons.likedBy:  array of userId strings (kept as strings because
+ *     lessons.userId is stored as a string in this collection; mixing
+ *     strings and ObjectIds in one array would make `$addToSet`/`$pull`
+ *     miss matches).
+ *   - lessons.likesCount: counter cache, kept in sync via `$inc`.
+ *
+ * Idempotency / concurrency:
+ *   - Read the current `likedBy` once.
+ *   - If the user is already in it → `$pull` and `$inc -1`.
+ *   - Otherwise → `$addToSet` (atomic no-op on duplicate) and `$inc +1`.
+ *   - `$addToSet` itself is the race guard: two near-simultaneous likes
+ *     both attempt to add the same userId; only one array entry exists,
+ *     so the count stays correct even under double-click.
+ *
+ * Response shape (matches the contract expected by the frontend
+ * `lib/actions/lessonActions.js` toggleLikeLesson):
+ *   {
+ *     action:      "like" | "unlike",
+ *     lessonId:    string,
+ *     isLiked:     boolean,   // post-toggle
+ *     likesCount:  number,    // post-toggle
+ *   }
+ */
+const toggleLikeLesson = async ({ lessonId, userId }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const existing = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { likedBy: 1 } }
+  );
+  if (!existing) throw httpError(404, "Lesson not found");
+
+  // Coerce to string so the membership check matches how `likedBy` is stored.
+  const uid = userId.toString();
+  const alreadyLiked = Array.isArray(existing.likedBy) && existing.likedBy.includes(uid);
+
+  let updated;
+  if (alreadyLiked) {
+    const result = await lessons.findOneAndUpdate(
+      { _id: new ObjectId(lessonId) },
+      { $pull: { likedBy: uid }, $inc: { likesCount: -1 } },
+      { returnDocument: "after" }
+    );
+    updated = result?.value ?? result; // driver v6 returns doc directly
+  } else {
+    const result = await lessons.findOneAndUpdate(
+      { _id: new ObjectId(lessonId) },
+      { $addToSet: { likedBy: uid }, $inc: { likesCount: 1 } },
+      { returnDocument: "after" }
+    );
+    updated = result?.value ?? result;
+  }
+
+  // Defensive: never let the counter go negative even if it was already
+  // out of sync before this request.
+  const likesCount = Math.max(0, Number(updated?.likesCount ?? 0));
+
+  return {
+    action: alreadyLiked ? "unlike" : "like",
+    lessonId: lessonId.toString(),
+    isLiked: !alreadyLiked,
+    likesCount,
+  };
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
   getLessonByIdService,
+  toggleLikeLesson,
 };

@@ -56,8 +56,39 @@ const getLessonById = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/lessons/:id/like
+ * Body: { userId }
+ *
+ * Idempotent toggle: first call likes, second call unlikes. The service
+ * is the source of truth for the resulting `isLiked` / `likesCount` /
+ * `action` so the UI can reconcile optimistic state on success.
+ */
+const toggleLikeLesson = async (req, res) => {
+  try {
+    const result = await lessonService.toggleLikeLesson({
+      lessonId: req.params.id,
+      userId: req.body?.userId,
+    });
+    return res.status(200).json({
+      message:
+        result.action === "like"
+          ? "Lesson liked successfully"
+          : "Lesson unliked successfully",
+      ...result,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error toggling lesson like" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
   getLessonById,
+  toggleLikeLesson,
 };
