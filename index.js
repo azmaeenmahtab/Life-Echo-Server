@@ -12,6 +12,7 @@ const planRoutes = require('./routes/plan.route');
 const imageRoutes = require('./routes/image.route');
 const lessonRoutes = require('./routes/lesson.route');
 const profileRoutes = require('./routes/profile.route');
+const commentRoutes = require('./routes/comment.route');
 
 
 const app = express();
@@ -45,11 +46,20 @@ app.use('/api', planRoutes)
 app.use('/api/images', imageRoutes)
 app.use('/api/lessons', lessonRoutes)
 app.use('/api/profile', profileRoutes)
+app.use('/api/comment', commentRoutes)
 
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Server is successfully running on http://localhost:${PORT}`);
-});
-
-db_connect().catch(console.dir);
+// Start the server only after MongoDB is connected. If the initial
+// connect fails we want the process to exit loudly (and `nodemon` to
+// restart it) rather than silently accept traffic against a closed
+// topology — that's the source of `MongoTopologyClosedError`.
+db_connect()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server is successfully running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Failed to connect to MongoDB on startup:", err);
+    process.exit(1);
+  });
  

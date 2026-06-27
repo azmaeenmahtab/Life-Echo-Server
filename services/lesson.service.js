@@ -4,6 +4,39 @@ const { client } = require("../db/db");
 const DB_NAME = "life-echo-db";
 const LESSONS_COLLECTION = "lessons";
 const USERS_COLLECTION = "user";
+const LESSON_REPORTS_COLLECTION = "lessonsReports";
+
+// Curated list of reasons surfaced in the report modal. Anything not in
+// this set is rejected at the service layer so a free-form text box can't
+// be abused to inject hostile content into the moderation queue.
+const ALLOWED_REPORT_REASONS = [
+  "spam",
+  "harassment",
+  "hate-speech",
+  "misinformation",
+  "inappropriate-content",
+  "copyright-violation",
+  "other",
+];
+
+let reportsIndexEnsured = false;
+
+/**
+ * Ensures a unique (lessonId, reporterUserId) compound index exists on
+ * the reports collection. Created lazily on the first report so a fresh
+ * database doesn't fail inserts before the index is provisioned. The
+ * idempotency guarantee is enforced by Mongo, not by application code,
+ * so concurrent double-submits still produce at most one row.
+ */
+const ensureReportsIndex = async () => {
+  if (reportsIndexEnsured) return;
+  const reports = client.db(DB_NAME).collection(LESSON_REPORTS_COLLECTION);
+  await reports.createIndex(
+    { lessonId: 1, reporterUserId: 1 },
+    { unique: true, name: "uniq_lesson_reporter" },
+  );
+  reportsIndexEnsured = true;
+};
 
 const ALLOWED_CATEGORIES = new Set([
   "personal-growth",
@@ -279,27 +312,28 @@ const toggleLikeLesson = async ({ lessonId, userId }) => {
 
   const existing = await lessons.findOne(
     { _id: new ObjectId(lessonId) },
-    { projection: { likedBy: 1 } }
+    { projection: { likedBy: 1 } },
   );
   if (!existing) throw httpError(404, "Lesson not found");
 
   // Coerce to string so the membership check matches how `likedBy` is stored.
   const uid = userId.toString();
-  const alreadyLiked = Array.isArray(existing.likedBy) && existing.likedBy.includes(uid);
+  const alreadyLiked =
+    Array.isArray(existing.likedBy) && existing.likedBy.includes(uid);
 
   let updated;
   if (alreadyLiked) {
     const result = await lessons.findOneAndUpdate(
       { _id: new ObjectId(lessonId) },
       { $pull: { likedBy: uid }, $inc: { likesCount: -1 } },
-      { returnDocument: "after" }
+      { returnDocument: "after" },
     );
     updated = result?.value ?? result; // driver v6 returns doc directly
   } else {
     const result = await lessons.findOneAndUpdate(
       { _id: new ObjectId(lessonId) },
       { $addToSet: { likedBy: uid }, $inc: { likesCount: 1 } },
-      { returnDocument: "after" }
+      { returnDocument: "after" },
     );
     updated = result?.value ?? result;
   }
@@ -316,9 +350,171 @@ const toggleLikeLesson = async ({ lessonId, userId }) => {
   };
 };
 
+/**
+ * Toggles the current user's save (bookmark) on a lesson.
+ *
+ * Mirrors `toggleLikeLesson` but operates on `savedBy` / `savesCount`.
+ * The bookmark list is typically smaller than the like list, but the
+ * race-safe `$addToSet` + `$inc` pattern is the same: a near-simultaneous
+ * double-tap converges on the correct counter value because `addToSet`
+ * is itself idempotent at the array level.
+ *
+ * Response shape (matches the contract expected by the frontend
+ * `lib/actions/lessonActions.js` toggleSaveLesson):
+ *   {
+ *     action:     "save" | "unsave",
+ *     lessonId:   string,
+ *     isSaved:    boolean,   // post-toggle
+ *     savesCount: number,    // post-toggle
+ *   }
+ */
+const toggleSaveLesson = async ({ lessonId, userId }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const existing = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { savedBy: 1 } },
+  );
+  if (!existing) throw httpError(404, "Lesson not found");
+
+  const uid = userId.toString();
+  const alreadySaved =
+    Array.isArray(existing.savedBy) && existing.savedBy.includes(uid);
+
+  let updated;
+  if (alreadySaved) {
+    const result = await lessons.findOneAndUpdate(
+      { _id: new ObjectId(lessonId) },
+      { $pull: { savedBy: uid }, $inc: { savesCount: -1 } },
+      { returnDocument: "after" },
+    );
+    updated = result?.value ?? result;
+  } else {
+    const result = await lessons.findOneAndUpdate(
+      { _id: new ObjectId(lessonId) },
+      { $addToSet: { savedBy: uid }, $inc: { savesCount: 1 } },
+      { returnDocument: "after" },
+    );
+    updated = result?.value ?? result;
+  }
+
+  const savesCount = Math.max(0, Number(updated?.savesCount ?? 0));
+
+  return {
+    action: alreadySaved ? "unsave" : "save",
+    lessonId: lessonId.toString(),
+    isSaved: !alreadySaved,
+    savesCount,
+  };
+};
+
+/**
+ * Records a moderation report against a lesson.
+ *
+ * Collection: `lessonsReports`
+ *   { lessonId, reporterUserId, reportedUserEmail, reason, timestamp }
+ *
+ * Behaviour:
+ *   - Validates the lesson exists (404 otherwise).
+ *   - Validates the reporter user exists (400 otherwise).
+ *   - Validates the reason against `ALLOWED_REPORT_REASONS` (400 otherwise).
+ *   - A unique compound index on (lessonId, reporterUserId) means the same
+ *     user can only report a given lesson once. A second attempt is
+ *     surfaced as a 409 conflict so the UI can keep the button disabled.
+ *
+ * Response shape (matches the contract consumed by the frontend
+ * `lib/actions/lessonActions.js` reportLesson):
+ *   {
+ *     lessonId, reporterUserId, reportedUserEmail, reason,
+ *     alreadyReported: boolean,
+ *   }
+ */
+const reportLesson = async ({ lessonId, reporterUserId, reportedUserEmail, reason }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!reporterUserId) throw httpError(400, "reporterUserId is required");
+  if (!reportedUserEmail) throw httpError(400, "reportedUserEmail is required");
+  if (!reason) throw httpError(400, "reason is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const normalisedReason = reason.toString().trim().toLowerCase();
+  if (!ALLOWED_REPORT_REASONS.includes(normalisedReason)) {
+    throw httpError(400, `Invalid report reason: ${reason}`);
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+  const users = client.db(DB_NAME).collection(USERS_COLLECTION);
+  const reports = client.db(DB_NAME).collection(LESSON_REPORTS_COLLECTION);
+
+  // Confirm the lesson exists before we accept the report — keeps the
+  // moderation queue from accumulating rows for deleted/hallucinated ids.
+  const lesson = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { _id: 1 } },
+  );
+  if (!lesson) throw httpError(404, "Lesson not found");
+
+  // Confirm the reporter is a real user. We accept any string id here
+  // (matching how like/save accept userId in the body) but require it to
+  // resolve in the users collection.
+  const reporter = await users.findOne(
+    { _id: reporterUserId },
+    { projection: { _id: 1, email: 1 } },
+  );
+  if (!reporter) throw httpError(400, "Reporter user not found");
+
+  await ensureReportsIndex();
+
+  const now = new Date();
+  const document = {
+    lessonId: lessonId.toString(),
+    reporterUserId: reporterUserId.toString(),
+    reportedUserEmail: reportedUserEmail.toString().trim().toLowerCase(),
+    reason: normalisedReason,
+    timestamp: now,
+  };
+
+  try {
+    await reports.insertOne(document);
+    return {
+      lessonId: document.lessonId,
+      reporterUserId: document.reporterUserId,
+      reportedUserEmail: document.reportedUserEmail,
+      reason: document.reason,
+      alreadyReported: false,
+    };
+  } catch (err) {
+    // Duplicate-key (E11000) means this reporter already filed a report
+    // for this lesson. Treat as a soft success so the UI can lock the
+    // button to its "Reported" state without surfacing a scary error.
+    if (err && err.code === 11000) {
+      return {
+        lessonId: document.lessonId,
+        reporterUserId: document.reporterUserId,
+        reportedUserEmail: document.reportedUserEmail,
+        reason: document.reason,
+        alreadyReported: true,
+      };
+    }
+    throw err;
+  }
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
   getLessonByIdService,
   toggleLikeLesson,
+  toggleSaveLesson,
+  reportLesson,
+  ALLOWED_REPORT_REASONS,
 };

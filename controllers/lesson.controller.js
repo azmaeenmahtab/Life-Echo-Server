@@ -86,9 +86,40 @@ const toggleLikeLesson = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/lessons/:id/save
+ * Body: { userId }
+ *
+ * Idempotent toggle: first call saves (bookmarks), second call unsaves.
+ * Same response contract shape as like so the frontend can use a single
+ * generic handler for both verbs.
+ */
+const toggleSaveLesson = async (req, res) => {
+  try {
+    const result = await lessonService.toggleSaveLesson({
+      lessonId: req.params.id,
+      userId: req.body?.userId,
+    });
+    return res.status(200).json({
+      message:
+        result.action === "save"
+          ? "Lesson saved successfully"
+          : "Lesson unsaved successfully",
+      ...result,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error toggling lesson save" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
   getLessonById,
   toggleLikeLesson,
+  toggleSaveLesson,
 };
