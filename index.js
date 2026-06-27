@@ -13,6 +13,7 @@ const imageRoutes = require('./routes/image.route');
 const lessonRoutes = require('./routes/lesson.route');
 const profileRoutes = require('./routes/profile.route');
 const commentRoutes = require('./routes/comment.route');
+const reportRoutes = require('./routes/report.route');
 
 
 const app = express();
@@ -47,6 +48,7 @@ app.use('/api/images', imageRoutes)
 app.use('/api/lessons', lessonRoutes)
 app.use('/api/profile', profileRoutes)
 app.use('/api/comment', commentRoutes)
+app.use('/api/report', reportRoutes)
 
 // Start the server only after MongoDB is connected. If the initial
 // connect fails we want the process to exit loudly (and `nodemon` to
