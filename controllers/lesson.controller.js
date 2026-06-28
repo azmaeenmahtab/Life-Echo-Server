@@ -154,6 +154,27 @@ const changeVisibilityController = async (req, res) => {
   }
 };
 
+const changeAccessLevelController = async (req, res) => {
+  try {
+    const { id: lessonId } = req.params;
+    const { accessLevel, userId } = req.body;
+
+    const result = await lessonService.changeAccessLevelService({
+      lessonId,
+      userId,
+      accessLevel,
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error changing access level" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
@@ -162,4 +183,5 @@ module.exports = {
   toggleLikeLesson,
   toggleSaveLesson,
   changeVisibilityController,
+  changeAccessLevelController,
 };

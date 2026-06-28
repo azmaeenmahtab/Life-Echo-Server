@@ -15,5 +15,9 @@ router.patch(
   "/:id/visibility/change",
   lessonController.changeVisibilityController,
 );
+router.patch(
+  "/:id/access-level/change",
+  lessonController.changeAccessLevelController,
+);
 
 module.exports = router;

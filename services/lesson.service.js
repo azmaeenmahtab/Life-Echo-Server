@@ -505,6 +505,99 @@ const changeVisibilityService = async ({ lessonId, userId, visibility }) => {
   };
 };
 
+/**
+ * Changes the access level of a lesson (free | premium).
+ *
+ * Authorization rules:
+ *   - Only the lesson owner can change access level.
+ *   - Only "pro" plan users are allowed to mark a lesson as "premium".
+ *     Attempting to upgrade to "premium" on a "free" plan returns 403.
+ *
+ * Response shape:
+ *   { lessonId, accessLevel, changed }
+ */
+const changeAccessLevelService = async ({ lessonId, userId, accessLevel }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+  if (!accessLevel) throw httpError(400, "accessLevel is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  if (!ALLOWED_ACCESS_LEVELS.has(accessLevel)) {
+    throw httpError(
+      400,
+      `accessLevel must be one of: ${Array.from(ALLOWED_ACCESS_LEVELS).join(", ")}`,
+    );
+  }
+
+  const db = client.db(DB_NAME);
+  const lessons = db.collection(LESSONS_COLLECTION);
+  const users = db.collection(USERS_COLLECTION);
+
+  const lesson = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { userId: 1, accessLevel: 1 } },
+  );
+  if (!lesson) throw httpError(404, "Lesson not found");
+
+  if (lesson.userId?.toString() !== userId.toString()) {
+    throw httpError(
+      403,
+      "You are not allowed to change this lesson's access level",
+    );
+  }
+
+  // Premium tier gate: the owner must be on the "pro" plan to set premium.
+  if (accessLevel === "premium") {
+    let ownerPlan = null;
+    if (ObjectId.isValid(userId)) {
+      const owner = await users.findOne(
+        { _id: new ObjectId(userId) },
+        { projection: { plan: 1 } },
+      );
+      ownerPlan = owner?.plan ?? null;
+    } else {
+      const owner = await users.findOne(
+        { _id: userId },
+        { projection: { plan: 1 } },
+      );
+      ownerPlan = owner?.plan ?? null;
+    }
+
+    if (ownerPlan !== "pro") {
+      throw httpError(
+        403,
+        "You must upgrade to Pro plan to publish premium lessons",
+      );
+    }
+  }
+
+  if (lesson.accessLevel === accessLevel) {
+    return {
+      lessonId: lessonId.toString(),
+      accessLevel,
+      changed: false,
+    };
+  }
+
+  const result = await lessons.findOneAndUpdate(
+    { _id: new ObjectId(lessonId) },
+    { $set: { accessLevel, updatedAt: new Date() } },
+    { returnDocument: "after", projection: { accessLevel: 1 } },
+  );
+
+  const updated = result?.value ?? result;
+  if (!updated) throw httpError(404, "Lesson not found");
+
+  return {
+    lessonId: lessonId.toString(),
+    accessLevel: updated.accessLevel,
+    changed: true,
+  };
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
@@ -513,4 +606,5 @@ module.exports = {
   toggleLikeLesson,
   toggleSaveLesson,
   changeVisibilityService,
+  changeAccessLevelService,
 };
