@@ -57,6 +57,58 @@ const getLessonsByUserId = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/lessons/user/:userId/favorites
+ *
+ * Returns every lesson the given user has bookmarked, enriched with the
+ * creator info (name + avatar) so the favorites table can render a row
+ * without an extra round-trip. Optional query params:
+ *   - category       (validated against ALLOWED_CATEGORIES by the service)
+ *   - emotionalTone  (validated against ALLOWED_TONES by the service)
+ */
+const getFavoriteLessonsController = async (req, res) => {
+  try {
+    const lessons = await lessonService.getFavoriteLessonsService(
+      req.params.userId,
+      req.query,
+    );
+    return res.status(200).json({
+      message: "Favorite lessons fetched successfully",
+      count: lessons.length,
+      lessons,
+    });
+  } catch (error) {
+    console.error("getFavoriteLessonsController error:", error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message:
+        status === 500 ? "Error fetching favorite lessons" : error.message,
+      error: error.message,
+    });
+  }
+};
+
+const removeFavoriteLessonController = async (req, res) => {
+  try {
+    const result = await lessonService.removeFavoriteLessonService(
+      req.params.userId,
+      req.params.lessonId,
+    );
+    return res.status(200).json({
+      message: "Lesson removed from favorites",
+      ...result,
+    });
+  } catch (error) {
+    console.error("removeFavoriteLessonController error:", error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message:
+        status === 500 ? "Error removing favorite lesson" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 const getLessonById = async (req, res) => {
   try {
     const lesson = await lessonService.getLessonByIdService(req.params.id);
@@ -239,6 +291,8 @@ module.exports = {
   createLesson,
   getPublicLessons,
   getLessonsByUserId,
+  getFavoriteLessonsController,
+  removeFavoriteLessonController,
   getLessonById,
   toggleLikeLesson,
   toggleSaveLesson,

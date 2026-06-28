@@ -8,6 +8,14 @@ router.get("/public", lessonController.getPublicLessons);
 // Static segment must come before "/:id" so Express doesn't capture
 // "user" as a lesson id.
 router.get("/user/:userId", lessonController.getLessonsByUserId);
+router.get(
+  "/user/:userId/favorites",
+  lessonController.getFavoriteLessonsController,
+);
+router.delete(
+  "/user/:userId/favorites/:lessonId",
+  lessonController.removeFavoriteLessonController,
+);
 router.get("/:id", lessonController.getLessonById);
 router.post("/:id/like", lessonController.toggleLikeLesson);
 router.post("/:id/save", lessonController.toggleSaveLesson);

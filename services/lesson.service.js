@@ -22,6 +22,9 @@ const ALLOWED_TONES = new Set([
 
 const ALLOWED_ACCESS_LEVELS = new Set(["free", "premium"]);
 
+const escapeRegex = (str = "") =>
+  str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
  * Creates an error with an attached HTTP status code so the controller
  * can forward it without re-inspecting the message.
@@ -298,6 +301,103 @@ const getLessonsByUserId = async (userId) => {
     },
     { $project: { creator: 0, userObjectId: 0 } },
     { $sort: { createdAt: -1 } },
+  ];
+
+  const docs = await lessons.aggregate(pipeline).toArray();
+  return docs;
+};
+
+/**
+ * Fetches every lesson the given user has bookmarked.
+ *
+ * The "favorites" concept maps to the `savedBy` array on each lesson: any
+ * lesson where `savedBy` contains the user's id (stored as a string) is
+ * treated as a favorite.
+ *
+ * Optional filters:
+ *   - category        single value, must be one of ALLOWED_CATEGORIES
+ *   - emotionalTone   single value, must be one of ALLOWED_TONES
+ *
+ * Sort order: most recently saved first. Because the document doesn't carry
+ * a per-user `savedAt`, we sort by `_id` descending (ObjectId encodes a
+ * creation timestamp) as a stand-in for "recently favorited". Acceptable
+ * approximation since favorites usually accumulate close to lesson creation.
+ *
+ * Creator lookup is performed the same way as `getLessonsByUserId` so the
+ * front-end can render the author without a second round-trip.
+ */
+const getFavoriteLessonsService = async (userId, query = {}) => {
+  if (!userId) throw httpError(400, "userId is required");
+
+  const uid = userId.toString().trim();
+  if (!ObjectId.isValid(uid)) {
+    throw httpError(400, "Invalid userId");
+  }
+
+  if (query.category != null && query.category !== "") {
+    const category = query.category.toString().trim().toLowerCase();
+    if (!ALLOWED_CATEGORIES.has(category)) {
+      throw httpError(400, `Invalid category: ${category}`);
+    }
+  }
+  if (query.emotionalTone != null && query.emotionalTone !== "") {
+    const tone = query.emotionalTone.toString().trim().toLowerCase();
+    if (!ALLOWED_TONES.has(tone)) {
+      throw httpError(400, `Invalid emotionalTone: ${tone}`);
+    }
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const filter = { savedBy: uid };
+  if (query.category) {
+    const category = query.category.toString().trim().toLowerCase();
+    // Case-insensitive exact match so capitalized/mixed-case stored
+    // values (e.g. "Career") still match a lowercase filter.
+    filter.category = { $regex: `^${escapeRegex(category)}$`, $options: "i" };
+  }
+  if (query.emotionalTone) {
+    const tone = query.emotionalTone.toString().trim().toLowerCase();
+    filter.emotionalTone = { $regex: `^${escapeRegex(tone)}$`, $options: "i" };
+  }
+
+  const pipeline = [
+    { $match: filter },
+    {
+      $addFields: {
+        userObjectId: {
+          $cond: [
+            { $eq: [{ $type: "$userId" }, "string"] },
+            { $toObjectId: "$userId" },
+            "$userId",
+          ],
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: USERS_COLLECTION,
+        localField: "userObjectId",
+        foreignField: "_id",
+        as: "creator",
+      },
+    },
+    {
+      $unwind: {
+        path: "$creator",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $addFields: {
+        creatorId: { $ifNull: ["$creator._id", null] },
+        creatorName: { $ifNull: ["$creator.name", null] },
+        creatorProfilePic: { $ifNull: ["$creator.image", null] },
+      },
+    },
+    { $project: { creator: 0, userObjectId: 0 } },
+    // Approximation of "most recently saved" using ObjectId timestamp.
+    { $sort: { _id: -1 } },
   ];
 
   const docs = await lessons.aggregate(pipeline).toArray();
@@ -664,10 +764,7 @@ const updateLessonService = async ({ lessonId, userId, payload }) => {
   if (payload.accessLevel !== undefined) {
     const accessLevel = payload.accessLevel.toString().trim();
     if (!ALLOWED_ACCESS_LEVELS.has(accessLevel)) {
-      throw httpError(
-        400,
-        'Access level must be either "free" or "premium"',
-      );
+      throw httpError(400, 'Access level must be either "free" or "premium"');
     }
     updates.accessLevel = accessLevel;
   }
@@ -769,11 +866,37 @@ const deleteLessonService = async ({ lessonId, userId }) => {
   return { lessonId };
 };
 
+const removeFavoriteLessonService = async (userId, lessonId) => {
+  if (!userId) throw httpError(400, "userId is required");
+  if (!lessonId) throw httpError(400, "lessonId is required");
+
+  const uid = userId.toString().trim();
+  const lid = lessonId.toString().trim();
+
+  if (!ObjectId.isValid(uid)) throw httpError(400, "Invalid userId");
+  if (!ObjectId.isValid(lid)) throw httpError(400, "Invalid lessonId");
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const result = await lessons.updateOne(
+    { _id: new ObjectId(lid) },
+    { $pull: { savedBy: uid } },
+  );
+
+  if (result.matchedCount === 0) {
+    throw httpError(404, "Lesson not found");
+  }
+
+  return { lessonId: lid, userId: uid, removed: result.modifiedCount > 0 };
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
   getLessonByIdService,
   getLessonsByUserId,
+  getFavoriteLessonsService,
+  removeFavoriteLessonService,
   toggleLikeLesson,
   toggleSaveLesson,
   changeVisibilityService,
