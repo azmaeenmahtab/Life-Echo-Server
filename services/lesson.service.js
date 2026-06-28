@@ -598,6 +598,177 @@ const changeAccessLevelService = async ({ lessonId, userId, accessLevel }) => {
   };
 };
 
+/**
+ * Updates an existing lesson owned by `userId`.
+ *
+ * Allowed fields: title, story, category, emotionalTone, accessLevel,
+ * imageUrl. User identity (userId) is taken from req.body and cannot be
+ * changed here. The `accessLevel === "premium"` branch is gated on the
+ * owner's plan === "pro" using the same check as changeAccessLevelService.
+ *
+ * Returns the updated lesson document.
+ */
+const updateLessonService = async ({ lessonId, userId, payload }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+  if (!payload || typeof payload !== "object") {
+    throw httpError(400, "payload is required");
+  }
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const updates = {};
+
+  if (payload.title !== undefined) {
+    const title = payload.title.toString().trim();
+    if (!title) throw httpError(400, "Lesson title is required");
+    if (title.length > 200) {
+      throw httpError(400, "Lesson title must be 200 characters or fewer");
+    }
+    updates.title = title;
+  }
+
+  if (payload.story !== undefined) {
+    const story = payload.story.toString().trim();
+    if (!story) throw httpError(400, "Story content is required");
+    updates.story = story;
+  }
+
+  if (payload.category !== undefined) {
+    const category = payload.category.toString().trim();
+    if (!ALLOWED_CATEGORIES.has(category)) {
+      throw httpError(400, "A valid category is required");
+    }
+    updates.category = category;
+  }
+
+  if (payload.emotionalTone !== undefined) {
+    const emotionalTone = payload.emotionalTone.toString().trim();
+    if (!ALLOWED_TONES.has(emotionalTone)) {
+      throw httpError(400, "A valid emotional tone is required");
+    }
+    updates.emotionalTone = emotionalTone;
+  }
+
+  if (payload.imageUrl !== undefined) {
+    // empty string / null clears the image; otherwise trim and store.
+    if (payload.imageUrl === null || payload.imageUrl === "") {
+      updates.imageUrl = null;
+    } else {
+      updates.imageUrl = payload.imageUrl.toString().trim();
+    }
+  }
+
+  if (payload.accessLevel !== undefined) {
+    const accessLevel = payload.accessLevel.toString().trim();
+    if (!ALLOWED_ACCESS_LEVELS.has(accessLevel)) {
+      throw httpError(
+        400,
+        'Access level must be either "free" or "premium"',
+      );
+    }
+    updates.accessLevel = accessLevel;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    throw httpError(400, "No updatable fields provided");
+  }
+
+  const db = client.db(DB_NAME);
+  const lessons = db.collection(LESSONS_COLLECTION);
+  const users = db.collection(USERS_COLLECTION);
+
+  const existing = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { userId: 1 } },
+  );
+  if (!existing) throw httpError(404, "Lesson not found");
+
+  if (existing.userId?.toString() !== userId.toString()) {
+    throw httpError(403, "You are not allowed to update this lesson");
+  }
+
+  // Premium tier gate: only Pro plan owners can set premium.
+  if (updates.accessLevel === "premium") {
+    let ownerPlan = null;
+    if (ObjectId.isValid(userId)) {
+      const owner = await users.findOne(
+        { _id: new ObjectId(userId) },
+        { projection: { plan: 1 } },
+      );
+      ownerPlan = owner?.plan ?? null;
+    } else {
+      const owner = await users.findOne(
+        { _id: userId },
+        { projection: { plan: 1 } },
+      );
+      ownerPlan = owner?.plan ?? null;
+    }
+
+    if (ownerPlan !== "pro") {
+      throw httpError(
+        403,
+        "You must upgrade to Pro plan to publish premium lessons",
+      );
+    }
+  }
+
+  updates.updatedAt = new Date();
+
+  const result = await lessons.findOneAndUpdate(
+    { _id: new ObjectId(lessonId) },
+    { $set: updates },
+    { returnDocument: "after" },
+  );
+
+  const updated = result?.value ?? result;
+  if (!updated) throw httpError(404, "Lesson not found");
+
+  return updated;
+};
+
+/**
+ * Deletes a lesson owned by `userId`.
+ *
+ * - Requires both `lessonId` and `userId`.
+ * - Enforces ownership: the caller's userId must match the lesson's
+ *   stored userId, otherwise throws 403.
+ * - Returns the deleted lessonId on success.
+ *
+ * Cascade behaviour (e.g. removing likes / saves / comments) is the
+ * caller's responsibility — this service removes the lesson document only.
+ */
+const deleteLessonService = async ({ lessonId, userId }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const db = client.db(DB_NAME);
+  const lessons = db.collection(LESSONS_COLLECTION);
+
+  const existing = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { userId: 1 } },
+  );
+  if (!existing) throw httpError(404, "Lesson not found");
+
+  if (existing.userId?.toString() !== userId.toString()) {
+    throw httpError(403, "You are not allowed to delete this lesson");
+  }
+
+  const result = await lessons.deleteOne({ _id: new ObjectId(lessonId) });
+  if (result.deletedCount === 0) {
+    throw httpError(404, "Lesson not found");
+  }
+
+  return { lessonId };
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
@@ -607,4 +778,6 @@ module.exports = {
   toggleSaveLesson,
   changeVisibilityService,
   changeAccessLevelService,
+  updateLessonService,
+  deleteLessonService,
 };

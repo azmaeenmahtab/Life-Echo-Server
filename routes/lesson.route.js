@@ -19,5 +19,7 @@ router.patch(
   "/:id/access-level/change",
   lessonController.changeAccessLevelController,
 );
+router.put("/:id", lessonController.updateLessonController);
+router.delete("/:id", lessonController.deleteLessonController);
 
 module.exports = router;

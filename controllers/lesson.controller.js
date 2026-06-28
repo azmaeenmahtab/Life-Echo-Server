@@ -175,6 +175,66 @@ const changeAccessLevelController = async (req, res) => {
   }
 };
 
+/**
+ * PUT /api/lessons/:id
+ * Body: { userId, title?, story?, category?, emotionalTone?, imageUrl?, accessLevel? }
+ *
+ * The owner-only check is enforced inside the service so it stays
+ * consistent with changeVisibilityService / changeAccessLevelService.
+ */
+const updateLessonController = async (req, res) => {
+  try {
+    const { id: lessonId } = req.params;
+    const { userId, ...payload } = req.body || {};
+
+    const lesson = await lessonService.updateLessonService({
+      lessonId,
+      userId,
+      payload,
+    });
+
+    return res.status(200).json({
+      message: "Lesson updated successfully",
+      lesson,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error updating lesson" : error.message,
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * DELETE /api/lessons/:id
+ *
+ * Owner-only. Removes the lesson document. The frontend should ask the
+ * user to confirm before calling this endpoint.
+ */
+const deleteLessonController = async (req, res) => {
+  try {
+    const { id: lessonId } = req.params;
+    const { userId } = req.body;
+
+    const result = await lessonService.deleteLessonService({
+      lessonId,
+      userId,
+    });
+
+    return res.status(200).json({
+      message: "Lesson deleted successfully",
+      lessonId: result.lessonId,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error deleting lesson" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
@@ -184,4 +244,6 @@ module.exports = {
   toggleSaveLesson,
   changeVisibilityController,
   changeAccessLevelController,
+  updateLessonController,
+  deleteLessonController,
 };
