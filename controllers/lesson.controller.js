@@ -40,6 +40,23 @@ const getPublicLessons = async (req, res) => {
   }
 };
 
+const getLessonsByUserId = async (req, res) => {
+  try {
+    const lessons = await lessonService.getLessonsByUserId(req.params.userId);
+    return res.status(200).json({
+      message: "User lessons fetched successfully",
+      count: lessons.length,
+      lessons,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error fetching user lessons" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 const getLessonById = async (req, res) => {
   try {
     const lesson = await lessonService.getLessonByIdService(req.params.id);
@@ -116,10 +133,33 @@ const toggleSaveLesson = async (req, res) => {
   }
 };
 
+const changeVisibilityController = async (req, res) => {
+  try {
+    const { id: lessonId } = req.params;
+    const { visibility, userId } = req.body;
+
+    const result = await lessonService.changeVisibilityService({
+      lessonId,
+      userId,
+      visibility,
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message: status === 500 ? "Error changing visibility" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createLesson,
   getPublicLessons,
+  getLessonsByUserId,
   getLessonById,
   toggleLikeLesson,
   toggleSaveLesson,
+  changeVisibilityController,
 };

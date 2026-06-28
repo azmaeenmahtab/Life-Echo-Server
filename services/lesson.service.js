@@ -4,39 +4,6 @@ const { client } = require("../db/db");
 const DB_NAME = "life-echo-db";
 const LESSONS_COLLECTION = "lessons";
 const USERS_COLLECTION = "user";
-const LESSON_REPORTS_COLLECTION = "lessonsReports";
-
-// Curated list of reasons surfaced in the report modal. Anything not in
-// this set is rejected at the service layer so a free-form text box can't
-// be abused to inject hostile content into the moderation queue.
-const ALLOWED_REPORT_REASONS = [
-  "spam",
-  "harassment",
-  "hate-speech",
-  "misinformation",
-  "inappropriate-content",
-  "copyright-violation",
-  "other",
-];
-
-let reportsIndexEnsured = false;
-
-/**
- * Ensures a unique (lessonId, reporterUserId) compound index exists on
- * the reports collection. Created lazily on the first report so a fresh
- * database doesn't fail inserts before the index is provisioned. The
- * idempotency guarantee is enforced by Mongo, not by application code,
- * so concurrent double-submits still produce at most one row.
- */
-const ensureReportsIndex = async () => {
-  if (reportsIndexEnsured) return;
-  const reports = client.db(DB_NAME).collection(LESSON_REPORTS_COLLECTION);
-  await reports.createIndex(
-    { lessonId: 1, reporterUserId: 1 },
-    { unique: true, name: "uniq_lesson_reporter" },
-  );
-  reportsIndexEnsured = true;
-};
 
 const ALLOWED_CATEGORIES = new Set([
   "personal-growth",
@@ -274,6 +241,70 @@ const getLessonByIdService = async (lessonId) => {
 };
 
 /**
+ * Fetches every lesson authored by the given user. The lookup mirrors
+ * `getPublicLessons`: lessons are joined to the `user` collection so the
+ * frontend gets the creator's name + profile pic in one round-trip.
+ *
+ * Returns an array (empty when the user has no lessons). Throws
+ * httpError(400) if `userId` is missing or not a valid ObjectId.
+ */
+const getLessonsByUserId = async (userId) => {
+  if (!userId) throw httpError(400, "userId is required");
+
+  const uid = userId.toString().trim();
+  if (!ObjectId.isValid(uid)) {
+    throw httpError(400, "Invalid userId");
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const pipeline = [
+    {
+      $match: {
+        $expr: { $eq: [{ $toString: "$userId" }, uid] },
+      },
+    },
+    {
+      $addFields: {
+        userObjectId: {
+          $cond: [
+            { $eq: [{ $type: "$userId" }, "string"] },
+            { $toObjectId: "$userId" },
+            "$userId",
+          ],
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: USERS_COLLECTION,
+        localField: "userObjectId",
+        foreignField: "_id",
+        as: "creator",
+      },
+    },
+    {
+      $unwind: {
+        path: "$creator",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $addFields: {
+        creatorId: { $ifNull: ["$creator._id", null] },
+        creatorName: { $ifNull: ["$creator.name", null] },
+        creatorProfilePic: { $ifNull: ["$creator.image", null] },
+      },
+    },
+    { $project: { creator: 0, userObjectId: 0 } },
+    { $sort: { createdAt: -1 } },
+  ];
+
+  const docs = await lessons.aggregate(pipeline).toArray();
+  return docs;
+};
+
+/**
  * Toggles the current user's like on a lesson.
  *
  * Data model:
@@ -415,106 +446,71 @@ const toggleSaveLesson = async ({ lessonId, userId }) => {
   };
 };
 
-/**
- * Records a moderation report against a lesson.
- *
- * Collection: `lessonsReports`
- *   { lessonId, reporterUserId, reportedUserEmail, reason, timestamp }
- *
- * Behaviour:
- *   - Validates the lesson exists (404 otherwise).
- *   - Validates the reporter user exists (400 otherwise).
- *   - Validates the reason against `ALLOWED_REPORT_REASONS` (400 otherwise).
- *   - A unique compound index on (lessonId, reporterUserId) means the same
- *     user can only report a given lesson once. A second attempt is
- *     surfaced as a 409 conflict so the UI can keep the button disabled.
- *
- * Response shape (matches the contract consumed by the frontend
- * `lib/actions/lessonActions.js` reportLesson):
- *   {
- *     lessonId, reporterUserId, reportedUserEmail, reason,
- *     alreadyReported: boolean,
- *   }
- */
-const reportLesson = async ({ lessonId, reporterUserId, reportedUserEmail, reason }) => {
+const ALLOWED_VISIBILITIES = ["public", "private"];
+
+const changeVisibilityService = async ({ lessonId, userId, visibility }) => {
   if (!lessonId) throw httpError(400, "lessonId is required");
-  if (!reporterUserId) throw httpError(400, "reporterUserId is required");
-  if (!reportedUserEmail) throw httpError(400, "reportedUserEmail is required");
-  if (!reason) throw httpError(400, "reason is required");
+  if (!userId) throw httpError(400, "userId is required");
+  if (!visibility) throw httpError(400, "visibility is required");
 
   if (!ObjectId.isValid(lessonId)) {
     throw httpError(400, "Invalid lessonId");
   }
 
-  const normalisedReason = reason.toString().trim().toLowerCase();
-  if (!ALLOWED_REPORT_REASONS.includes(normalisedReason)) {
-    throw httpError(400, `Invalid report reason: ${reason}`);
+  if (!ALLOWED_VISIBILITIES.includes(visibility)) {
+    throw httpError(
+      400,
+      `visibility must be one of: ${ALLOWED_VISIBILITIES.join(", ")}`,
+    );
   }
 
   const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
-  const users = client.db(DB_NAME).collection(USERS_COLLECTION);
-  const reports = client.db(DB_NAME).collection(LESSON_REPORTS_COLLECTION);
 
-  // Confirm the lesson exists before we accept the report — keeps the
-  // moderation queue from accumulating rows for deleted/hallucinated ids.
-  const lesson = await lessons.findOne(
+  const existing = await lessons.findOne(
     { _id: new ObjectId(lessonId) },
-    { projection: { _id: 1 } },
+    { projection: { userId: 1, visibility: 1 } },
   );
-  if (!lesson) throw httpError(404, "Lesson not found");
+  if (!existing) throw httpError(404, "Lesson not found");
 
-  // Confirm the reporter is a real user. We accept any string id here
-  // (matching how like/save accept userId in the body) but require it to
-  // resolve in the users collection.
-  const reporter = await users.findOne(
-    { _id: reporterUserId },
-    { projection: { _id: 1, email: 1 } },
-  );
-  if (!reporter) throw httpError(400, "Reporter user not found");
-
-  await ensureReportsIndex();
-
-  const now = new Date();
-  const document = {
-    lessonId: lessonId.toString(),
-    reporterUserId: reporterUserId.toString(),
-    reportedUserEmail: reportedUserEmail.toString().trim().toLowerCase(),
-    reason: normalisedReason,
-    timestamp: now,
-  };
-
-  try {
-    await reports.insertOne(document);
-    return {
-      lessonId: document.lessonId,
-      reporterUserId: document.reporterUserId,
-      reportedUserEmail: document.reportedUserEmail,
-      reason: document.reason,
-      alreadyReported: false,
-    };
-  } catch (err) {
-    // Duplicate-key (E11000) means this reporter already filed a report
-    // for this lesson. Treat as a soft success so the UI can lock the
-    // button to its "Reported" state without surfacing a scary error.
-    if (err && err.code === 11000) {
-      return {
-        lessonId: document.lessonId,
-        reporterUserId: document.reporterUserId,
-        reportedUserEmail: document.reportedUserEmail,
-        reason: document.reason,
-        alreadyReported: true,
-      };
-    }
-    throw err;
+  // Only the owner can change visibility
+  if (existing.userId?.toString() !== userId.toString()) {
+    throw httpError(
+      403,
+      "You are not allowed to change this lesson's visibility",
+    );
   }
+
+  // No-op if visibility is already what was requested
+  if (existing.visibility === visibility) {
+    return {
+      lessonId: lessonId.toString(),
+      visibility,
+      changed: false,
+    };
+  }
+
+  const result = await lessons.findOneAndUpdate(
+    { _id: new ObjectId(lessonId) },
+    { $set: { visibility, updatedAt: new Date() } },
+    { returnDocument: "after", projection: { visibility: 1 } },
+  );
+
+  const updated = result?.value ?? result;
+  if (!updated) throw httpError(404, "Lesson not found");
+
+  return {
+    lessonId: lessonId.toString(),
+    visibility: updated.visibility,
+    changed: true,
+  };
 };
 
 module.exports = {
   createLesson,
   getPublicLessons,
   getLessonByIdService,
+  getLessonsByUserId,
   toggleLikeLesson,
   toggleSaveLesson,
-  reportLesson,
-  ALLOWED_REPORT_REASONS,
+  changeVisibilityService,
 };
