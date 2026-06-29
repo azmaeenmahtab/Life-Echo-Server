@@ -1,4 +1,7 @@
 // auth.js (or wherever you initialize auth)
+const dotenv = require("dotenv");
+dotenv.config();
+
 const { betterAuth } = require("better-auth");
 const { mongodbAdapter } = require("better-auth/adapters/mongodb");
 const { MongoClient } = require("mongodb");
