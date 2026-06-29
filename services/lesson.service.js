@@ -134,6 +134,17 @@ const buildPublicLessonQuery = (query = {}) => {
     }
   }
 
+  // Featured-only filter (powers the home "Featured Lessons" section).
+  // Accepts `?featured=true` (also "1"/"yes" for forgiving client use).
+  if (query.featured != null && query.featured !== "") {
+    const flag = query.featured.toString().trim().toLowerCase();
+    if (["true", "1", "yes"].includes(flag)) {
+      filter.isFeatured = true;
+    } else if (["false", "0", "no"].includes(flag)) {
+      filter.isFeatured = { $ne: true };
+    }
+  }
+
   // Only surface public, free lessons on the public route.
 
   // filter.accessLevel = "free";
