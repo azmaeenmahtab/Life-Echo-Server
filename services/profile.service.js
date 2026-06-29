@@ -94,6 +94,10 @@ const getCreatorProfileService = async (userId) => {
       image: user.image ?? null,
       bio: user.bio ?? null,
       plan: user.plan ?? "free",
+      // Surface `role` so the admin profile header can render the
+      // "Admin" badge. Default to "user" so older docs that pre-date
+      // the role field still behave correctly.
+      role: user.role ?? "user",
       authorTitle: user.authorTitle ?? null,
       lessonsCount: user.lessonsCount ?? null,
       studentsCount: user.studentsCount ?? null,

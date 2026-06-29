@@ -77,4 +77,73 @@ const getReportsCount = async (_req, res) => {
   }
 };
 
-module.exports = { submitReport, getAllReports, getReportsCount };
+/**
+ * Returns one row per reported lesson with the report count and the
+ * unique set of recent reasons. Drives the admin reported-lessons
+ * table.
+ */
+const getReportedLessonsGrouped = async (_req, res) => {
+  try {
+    const data = await reportService.getReportedLessonsGrouped();
+    return res.status(200).json(data);
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      message: "Error fetching reported lessons",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Returns the full list of reports for a single lesson, joined with
+ * the lesson and reporter. Drives the "View reasons" modal.
+ */
+const getReportsForLesson = async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+    if (!lessonId) {
+      return res.status(400).json({ message: "lessonId is required" });
+    }
+    const data = await reportService.getReportsForLesson({ lessonId });
+    return res.status(200).json(data);
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      message: "Error fetching reports for lesson",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Drops every report for the given lesson. The lesson itself is kept
+ * intact — this is the "Ignore" admin action.
+ */
+const ignoreLessonReports = async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+    if (!lessonId) {
+      return res.status(400).json({ message: "lessonId is required" });
+    }
+    const result = await reportService.ignoreLessonReportsService({
+      lessonId,
+    });
+    return res.status(200).json({
+      message: "Reports ignored successfully.",
+      ...result,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      message: "Error ignoring reports",
+      error: error.message,
+    });
+  }
+};
+
+module.exports = {
+  submitReport,
+  getAllReports,
+  getReportsCount,
+  getReportedLessonsGrouped,
+  getReportsForLesson,
+  ignoreLessonReports,
+};

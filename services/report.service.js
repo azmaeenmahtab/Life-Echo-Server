@@ -210,9 +210,223 @@ const getAllReports = async () => {
   return { total: list.length, reports: list };
 };
 
+/**
+ * Same shape as `getAllReports` but filtered to a single lesson. Used
+ * by the admin modal that opens when an admin clicks "View reasons" on
+ * a row of the grouped reported-lessons table.
+ */
+const getReportsForLesson = async ({ lessonId }) => {
+  if (!ObjectId.isValid(lessonId)) {
+    const error = new Error("Invalid lessonId");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const client = await getClient();
+  const db = client.db(DB_NAME);
+  const reports = db.collection(REPORTS_COLLECTION);
+  const lessonObjectId = new ObjectId(lessonId);
+
+  // Reuse the same join pipeline as `getAllReports` but anchor it on
+  // the requested lesson. We inline the pipeline here so we can keep
+  // the two endpoints independent and the queries readable.
+  const pipeline = [
+    { $match: { lessonId: lessonObjectId } },
+    {
+      $lookup: {
+        from: "lessons",
+        localField: "lessonId",
+        foreignField: "_id",
+        as: "lesson",
+      },
+    },
+    { $unwind: { path: "$lesson", preserveNullAndEmptyArrays: true } },
+    {
+      $addFields: {
+        reporterObjectId: {
+          $cond: [
+            { $eq: [{ $type: "$userId" }, "string"] },
+            {
+              $cond: [
+                { $eq: [{ $strLenCP: { $ifNull: ["$userId", ""] } }, 24] },
+                { $toObjectId: "$userId" },
+                null,
+              ],
+            },
+            "$userId",
+          ],
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "user",
+        localField: "reporterObjectId",
+        foreignField: "_id",
+        as: "reporter",
+      },
+    },
+    { $unwind: { path: "$reporter", preserveNullAndEmptyArrays: true } },
+    { $sort: { submittedAt: -1 } },
+    {
+      $addFields: {
+        lessonTitle: { $ifNull: ["$lesson.title", null] },
+        lessonImage: { $ifNull: ["$lesson.imageUrl", null] },
+        lessonCategory: { $ifNull: ["$lesson.category", null] },
+        lessonAccessLevel: { $ifNull: ["$lesson.accessLevel", null] },
+        reporterName: { $ifNull: ["$reporter.name", null] },
+        reporterEmail: { $ifNull: ["$reporter.email", null] },
+        reporterImage: { $ifNull: ["$reporter.image", null] },
+      },
+    },
+    { $unset: ["reporterObjectId", "lesson", "reporter"] },
+    {
+      $project: {
+        _id: 1,
+        reason: 1,
+        submittedAt: 1,
+        lessonId: 1,
+        userId: 1,
+        lessonTitle: 1,
+        lessonImage: 1,
+        lessonCategory: 1,
+        lessonAccessLevel: 1,
+        reporterName: 1,
+        reporterEmail: 1,
+        reporterImage: 1,
+      },
+    },
+  ];
+
+  const list = await reports.aggregate(pipeline).toArray();
+  return { total: list.length, reports: list };
+};
+
+/**
+ * Returns one row per lesson that has at least one report, with the
+ * report count and a snapshot of the most recent reasons/reports.
+ *
+ * The grouped payload is what the admin table renders. The detailed
+ * "View reasons" modal then calls `getReportsForLesson` to fetch the
+ * full list on demand so the table query stays cheap.
+ *
+ * Output shape (per row):
+ *   {
+ *     lessonId:        string,
+ *     lessonTitle:     string | null,
+ *     lessonImage:     string | null,
+ *     lessonCategory:  string | null,
+ *     lessonAccessLevel: string | null,
+ *     reportCount:     number,
+ *     lastSubmittedAt: Date | null,
+ *     recentReasons:   string[]  // unique reasons from the latest 5 reports
+ *   }
+ */
+const getReportedLessonsGrouped = async () => {
+  const client = await getClient();
+  const db = client.db(DB_NAME);
+  const reports = db.collection(REPORTS_COLLECTION);
+
+  const pipeline = [
+    { $sort: { submittedAt: -1 } },
+    {
+      $group: {
+        _id: "$lessonId",
+        reportCount: { $sum: 1 },
+        lastSubmittedAt: { $max: "$submittedAt" },
+        // Keep the latest 5 reports so we can derive a unique reason
+        // list and embed lightweight reporter info on the row.
+        recent: {
+          $push: {
+            _id: "$_id",
+            reason: "$reason",
+            submittedAt: "$submittedAt",
+            userId: "$userId",
+          },
+        },
+      },
+    },
+    {
+      $addFields: {
+        // Trim to the first 5 after sorting by submittedAt desc.
+        recent: { $slice: ["$recent", 5] },
+      },
+    },
+    {
+      $lookup: {
+        from: "lessons",
+        localField: "_id",
+        foreignField: "_id",
+        as: "lesson",
+      },
+    },
+    { $unwind: { path: "$lesson", preserveNullAndEmptyArrays: true } },
+    {
+      $addFields: {
+        lessonId: "$_id",
+        lessonTitle: { $ifNull: ["$lesson.title", null] },
+        lessonImage: { $ifNull: ["$lesson.imageUrl", null] },
+        lessonCategory: { $ifNull: ["$lesson.category", null] },
+        lessonAccessLevel: { $ifNull: ["$lesson.accessLevel", null] },
+        // Dedupe reasons for the quick-scan chip.
+        recentReasons: {
+          $setUnion: ["$recent.reason", []],
+        },
+      },
+    },
+    { $unset: ["lesson", "recent"] },
+    { $sort: { reportCount: -1, lastSubmittedAt: -1 } },
+    {
+      $project: {
+        _id: 0,
+        lessonId: 1,
+        lessonTitle: 1,
+        lessonImage: 1,
+        lessonCategory: 1,
+        lessonAccessLevel: 1,
+        reportCount: 1,
+        lastSubmittedAt: 1,
+        recentReasons: 1,
+      },
+    },
+  ];
+
+  const list = await reports.aggregate(pipeline).toArray();
+  return { total: list.length, lessons: list };
+};
+
+/**
+ * Removes every report pointing at the given lesson. Returns the number
+ * of reports deleted so the admin UI can show a confirmation toast.
+ *
+ * The lesson itself is NOT modified — that's the "Ignore" action: the
+ * reports are dropped and the lesson stays live.
+ */
+const ignoreLessonReportsService = async ({ lessonId }) => {
+  if (!ObjectId.isValid(lessonId)) {
+    const error = new Error("Invalid lessonId");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const client = await getClient();
+  const db = client.db(DB_NAME);
+  const reports = db.collection(REPORTS_COLLECTION);
+  const lessonObjectId = new ObjectId(lessonId);
+
+  const result = await reports.deleteMany({ lessonId: lessonObjectId });
+  return {
+    lessonId,
+    deletedCount: Number(result?.deletedCount ?? 0),
+  };
+};
+
 module.exports = {
   createReport,
   getAllReports,
   getReportsCount,
+  getReportsForLesson,
+  getReportedLessonsGrouped,
+  ignoreLessonReportsService,
   VALID_REASONS,
 };
