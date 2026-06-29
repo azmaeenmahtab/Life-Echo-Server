@@ -1,0 +1,4 @@
+◇ injected env (2) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+Pinged your deployment. You successfully connected to MongoDB!
+Server is successfully running on http://localhost:5000

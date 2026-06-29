@@ -27,6 +27,10 @@ router.patch(
   "/:id/access-level/change",
   lessonController.changeAccessLevelController,
 );
+router.patch(
+  "/:id/review-status/change",
+  lessonController.setReviewStatusController,
+);
 router.put("/:id", lessonController.updateLessonController);
 router.delete("/:id", lessonController.deleteLessonController);
 

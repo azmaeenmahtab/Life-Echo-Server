@@ -96,4 +96,123 @@ const reports = db.collection(REPORTS_COLLECTION);
   return { alreadyReported: false, report: { _id: result.insertedId, ...document } };
 };
 
-module.exports = { createReport, VALID_REASONS };
+/**
+ * Returns the total number of reports across all lessons. The admin
+ * dashboard uses this to render the "Reported Lessons" stat card
+ * without paying the cost of joining the full report list.
+ */
+const getReportsCount = async () => {
+  const client = await getClient();
+  const db = client.db(DB_NAME);
+  const reports = db.collection(REPORTS_COLLECTION);
+  const total = await reports.countDocuments({});
+  return { total: Number(total ?? 0) };
+};
+
+/**
+ * Returns every report joined with the lesson title and the
+ * reporting user's display name so the admin table can render a
+ * single round-trip.
+ *
+ * Notes on the join strategy:
+ *  - `reports.lessonId` is stored as ObjectId, so the first `$lookup`
+ *    matches directly against the `lessons` collection.
+ *  - `reports.userId` is stored as a *string* (to mirror how the
+ *    comments/services persist it), so we coerce it to ObjectId
+ *    inside the pipeline with `$toObjectId` before the second
+ *    `$lookup`. Malformed ids are filtered to null and dropped from
+ *    the embedded `reporter` block rather than throwing, because
+ *    the report itself is still valid.
+ *
+ * Sorted newest-first so the admin table shows the freshest reports
+ * at the top.
+ */
+const getAllReports = async () => {
+  const client = await getClient();
+  const db = client.db(DB_NAME);
+  const reports = db.collection(REPORTS_COLLECTION);
+
+  const pipeline = [
+    {
+      $lookup: {
+        from: "lessons",
+        localField: "lessonId",
+        foreignField: "_id",
+        as: "lesson",
+      },
+    },
+    { $unwind: { path: "$lesson", preserveNullAndEmptyArrays: true } },
+    {
+      $addFields: {
+        // The reporting user id is a string in this collection; convert
+        // it to ObjectId for the lookup and skip silently if it isn't
+        // a valid id.
+        reporterObjectId: {
+          $cond: [
+            { $eq: [{ $type: "$userId" }, "string"] },
+            {
+              $cond: [
+                { $eq: [{ $strLenCP: { $ifNull: ["$userId", ""] } }, 24] },
+                { $toObjectId: "$userId" },
+                null,
+              ],
+            },
+            "$userId",
+          ],
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "user",
+        localField: "reporterObjectId",
+        foreignField: "_id",
+        as: "reporter",
+      },
+    },
+    { $unwind: { path: "$reporter", preserveNullAndEmptyArrays: true } },
+    { $sort: { submittedAt: -1 } },
+    // Flatten the embedded `lesson` and `reporter` objects into top-level
+    // fields, then drop the originals. We do this before `$project` so the
+    // projection stage can stay inclusion-only (MongoDB rejects mixing
+    // inclusion + exclusion in a single `$project`).
+    {
+      $addFields: {
+        lessonTitle: { $ifNull: ["$lesson.title", null] },
+        lessonImage: { $ifNull: ["$lesson.imageUrl", null] },
+        lessonCategory: { $ifNull: ["$lesson.category", null] },
+        lessonAccessLevel: { $ifNull: ["$lesson.accessLevel", null] },
+        reporterName: { $ifNull: ["$reporter.name", null] },
+        reporterEmail: { $ifNull: ["$reporter.email", null] },
+        reporterImage: { $ifNull: ["$reporter.image", null] },
+      },
+    },
+    { $unset: ["reporterObjectId", "lesson", "reporter"] },
+    {
+      $project: {
+        _id: 1,
+        reason: 1,
+        submittedAt: 1,
+        lessonId: 1,
+        userId: 1,
+        lessonTitle: 1,
+        lessonImage: 1,
+        lessonCategory: 1,
+        lessonAccessLevel: 1,
+        reporterName: 1,
+        reporterEmail: 1,
+        reporterImage: 1,
+      },
+    },
+  ];
+
+  const list = await reports.aggregate(pipeline).toArray();
+  return { total: list.length, reports: list };
+};
+
+module.exports = {
+  createReport,
+  getAllReports,
+  getReportsCount,
+  VALID_REASONS,
+};

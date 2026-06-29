@@ -45,4 +45,36 @@ const submitReport = async (req, res) => {
   }
 };
 
-module.exports = { submitReport };
+/**
+ * Returns every report joined with the lesson + reporter info for
+ * the admin "Reported Lessons" page. Newest first.
+ */
+const getAllReports = async (_req, res) => {
+  try {
+    const { total, reports } = await reportService.getAllReports();
+    return res.status(200).json({ total, reports });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Error fetching reports",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Returns the total number of reports. The admin dashboard's stat
+ * card calls this so it doesn't have to materialise the full join.
+ */
+const getReportsCount = async (_req, res) => {
+  try {
+    const { total } = await reportService.getReportsCount();
+    return res.status(200).json({ total });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Error fetching report count",
+      error: error.message,
+    });
+  }
+};
+
+module.exports = { submitReport, getAllReports, getReportsCount };

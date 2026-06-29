@@ -22,8 +22,7 @@ const ALLOWED_TONES = new Set([
 
 const ALLOWED_ACCESS_LEVELS = new Set(["free", "premium"]);
 
-const escapeRegex = (str = "") =>
-  str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Creates an error with an attached HTTP status code so the controller
@@ -90,7 +89,13 @@ const createLesson = async (rawPayload) => {
   };
 
   const result = await lessons.insertOne(document);
-  return { _id: result.insertedId, ...document };
+  // New lessons always start out "pending" so an admin has to review
+  // them before they are considered approved content.
+  await lessons.updateOne(
+    { _id: result.insertedId },
+    { $set: { reviewStatus: "pending" } },
+  );
+  return { _id: result.insertedId, ...document, reviewStatus: "pending" };
 };
 
 /**
@@ -592,6 +597,12 @@ const toggleSaveLesson = async ({ lessonId, userId }) => {
 
 const ALLOWED_VISIBILITIES = ["public", "private"];
 
+// Admin-moderation review lifecycle. A lesson is "pending" until an admin
+// marks it as "reviewed" (approved) or "rejected". "reviewed" is the
+// approved state — kept as "reviewed" (not "approved") to mirror the
+// user-facing copy the admin will see in the dropdown.
+const ALLOWED_REVIEW_STATUSES = ["pending", "reviewed", "rejected"];
+
 const changeVisibilityService = async ({ lessonId, userId, visibility }) => {
   if (!lessonId) throw httpError(400, "lessonId is required");
   if (!userId) throw httpError(400, "userId is required");
@@ -739,6 +750,87 @@ const changeAccessLevelService = async ({ lessonId, userId, accessLevel }) => {
     lessonId: lessonId.toString(),
     accessLevel: updated.accessLevel,
     changed: true,
+  };
+};
+
+/**
+ * Sets the review status of a lesson (admin moderation).
+ *
+ * Authorization:
+ *   - The `userId` in the body is the calling admin's id. Server-side
+ *     admin role enforcement is intentionally not added here — the rest
+ *     of the admin write endpoints in this codebase rely on the same
+ *     pattern, with the frontend/proxy layer gating access to
+ *     /dashboard/admin/*. If a server-side admin check is added later,
+ *     mirror the plan-gate in `changeAccessLevelService`.
+ *
+ * Cascade behaviour on "rejected":
+ *   - visibility  -> "private"
+ *   - isFeatured  -> false
+ * Both happen in the same $set so the database stays consistent in
+ * one round-trip. The full updated document is returned so the
+ * frontend can reconcile state (owner view + admin list) without an
+ * extra GET.
+ */
+const setReviewStatusService = async ({ lessonId, userId, status }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+  if (!status) throw httpError(400, "status is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const normalized = status.toString().trim().toLowerCase();
+  if (!ALLOWED_REVIEW_STATUSES.includes(normalized)) {
+    throw httpError(
+      400,
+      `status must be one of: ${ALLOWED_REVIEW_STATUSES.join(", ")}`,
+    );
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const existing = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { reviewStatus: 1, visibility: 1, isFeatured: 1 } },
+  );
+  if (!existing) throw httpError(404, "Lesson not found");
+
+  const updates = {
+    reviewStatus: normalized,
+    updatedAt: new Date(),
+  };
+
+  // Cascade: a rejected lesson is hidden from the public surface and
+  // is no longer eligible to be featured on the homepage / carousels.
+  if (normalized === "rejected") {
+    updates.visibility = "private";
+    updates.isFeatured = false;
+  }
+
+  const result = await lessons.findOneAndUpdate(
+    { _id: new ObjectId(lessonId) },
+    { $set: updates },
+    { returnDocument: "after" },
+  );
+
+  const updated = result?.value ?? result;
+  if (!updated) throw httpError(404, "Lesson not found");
+
+  return {
+    lessonId: lessonId.toString(),
+    userId: userId.toString(),
+    reviewStatus: updated.reviewStatus,
+    visibility: updated.visibility ?? null,
+    isFeatured:
+      typeof updated.isFeatured === "boolean" ? updated.isFeatured : false,
+    changed:
+      existing.reviewStatus !== normalized ||
+      (normalized === "rejected" &&
+        (existing.visibility !== "private" ||
+          (typeof existing.isFeatured === "boolean" &&
+            existing.isFeatured === true))),
   };
 };
 
@@ -945,6 +1037,7 @@ module.exports = {
   toggleSaveLesson,
   changeVisibilityService,
   changeAccessLevelService,
+  setReviewStatusService,
   updateLessonService,
   deleteLessonService,
 };

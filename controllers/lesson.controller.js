@@ -237,6 +237,41 @@ const changeAccessLevelController = async (req, res) => {
  * The owner-only check is enforced inside the service so it stays
  * consistent with changeVisibilityService / changeAccessLevelService.
  */
+/**
+ * PATCH /api/lessons/:id/review-status
+ * Body: { userId, status }
+ *
+ * Admin moderation action. `status` is one of
+ *   "pending" | "reviewed" | "rejected".
+ * Setting status to "rejected" cascades visibility -> "private" and
+ * isFeatured -> false in the same request — the response carries
+ * the post-cascade values so the admin list can update its row.
+ */
+const setReviewStatusController = async (req, res) => {
+  try {
+    const { id: lessonId } = req.params;
+    const { userId, status } = req.body || {};
+
+    const result = await lessonService.setReviewStatusService({
+      lessonId,
+      userId,
+      status,
+    });
+
+    return res.status(200).json({
+      message: "Lesson review status updated",
+      ...result,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message:
+        status === 500 ? "Error updating lesson review status" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 const updateLessonController = async (req, res) => {
   try {
     const { id: lessonId } = req.params;
@@ -301,6 +336,7 @@ module.exports = {
   toggleSaveLesson,
   changeVisibilityController,
   changeAccessLevelController,
+  setReviewStatusController,
   updateLessonController,
   deleteLessonController,
 };
