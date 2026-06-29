@@ -248,10 +248,16 @@ const getLessonByIdService = async (lessonId) => {
  * `getPublicLessons`: lessons are joined to the `user` collection so the
  * frontend gets the creator's name + profile pic in one round-trip.
  *
+ * Optional query params (same shape as `getPublicLessons`):
+ *   - category        single value, must be one of ALLOWED_CATEGORIES
+ *   - tone            single value, must be one of ALLOWED_TONES
+ *   - keywords        case-insensitive partial match across title + story
+ *   - sortby          "newest" (default) | "mostsaved"
+ *
  * Returns an array (empty when the user has no lessons). Throws
  * httpError(400) if `userId` is missing or not a valid ObjectId.
  */
-const getLessonsByUserId = async (userId) => {
+const getLessonsByUserId = async (userId, query = {}) => {
   if (!userId) throw httpError(400, "userId is required");
 
   const uid = userId.toString().trim();
@@ -259,14 +265,52 @@ const getLessonsByUserId = async (userId) => {
     throw httpError(400, "Invalid userId");
   }
 
+  // Validate + normalise the optional filters using the same rules as
+  // the public list endpoint, so the profile page mirrors the public
+  // filter UX exactly.
+  const filter = {
+    $expr: { $eq: [{ $toString: "$userId" }, uid] },
+  };
+
+  if (query.category != null && query.category !== "") {
+    const category = query.category.toString().trim();
+    if (!ALLOWED_CATEGORIES.has(category)) {
+      throw httpError(400, `Invalid category: ${category}`);
+    }
+    filter.category = category;
+  }
+
+  if (query.tone != null && query.tone !== "") {
+    const tone = query.tone.toString().trim();
+    if (!ALLOWED_TONES.has(tone)) {
+      throw httpError(400, `Invalid emotional tone: ${tone}`);
+    }
+    filter.emotionalTone = tone;
+  }
+
+  if (query.keywords != null && query.keywords !== "") {
+    const keywords = query.tone !== undefined ? query.keywords : query.keywords;
+    const kw = keywords.toString().trim();
+    if (kw.length > 0) {
+      const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
+      filter.$and = filter.$and || [];
+      filter.$and.push({ $or: [{ title: regex }, { story: regex }] });
+    }
+  }
+
+  let sort = { createdAt: -1 };
+  const sortby = (query.sortby ?? "newest").toString().trim().toLowerCase();
+  if (sortby === "mostsaved") {
+    sort = { savesCount: -1, createdAt: -1 };
+  } else if (sortby !== "newest") {
+    throw httpError(400, `Invalid sortby: ${sortby}`);
+  }
+
   const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
 
   const pipeline = [
-    {
-      $match: {
-        $expr: { $eq: [{ $toString: "$userId" }, uid] },
-      },
-    },
+    { $match: filter },
     {
       $addFields: {
         userObjectId: {
@@ -300,7 +344,7 @@ const getLessonsByUserId = async (userId) => {
       },
     },
     { $project: { creator: 0, userObjectId: 0 } },
-    { $sort: { createdAt: -1 } },
+    { $sort: sort },
   ];
 
   const docs = await lessons.aggregate(pipeline).toArray();

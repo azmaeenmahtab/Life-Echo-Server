@@ -42,7 +42,10 @@ const getPublicLessons = async (req, res) => {
 
 const getLessonsByUserId = async (req, res) => {
   try {
-    const lessons = await lessonService.getLessonsByUserId(req.params.userId);
+    const lessons = await lessonService.getLessonsByUserId(
+      req.params.userId,
+      req.query,
+    );
     return res.status(200).json({
       message: "User lessons fetched successfully",
       count: lessons.length,
