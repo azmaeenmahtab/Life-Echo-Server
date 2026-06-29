@@ -272,6 +272,45 @@ const setReviewStatusController = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /api/lessons/:id/featured
+ * Body: { userId, isFeatured? }
+ *
+ * Admin-only moderation action that flips the `isFeatured` flag on a
+ * lesson. `isFeatured` is optional — when omitted, the service toggles
+ * the current value. Returns the post-update `isFeatured` and a
+ * `changed` flag so the UI can reconcile without an extra GET.
+ *
+ * Returns 409 if the lesson is rejected or private and the admin is
+ * trying to mark it as featured (the guardrails live in the service).
+ */
+const toggleFeaturedController = async (req, res) => {
+  try {
+    const { id: lessonId } = req.params;
+    const { userId, isFeatured } = req.body || {};
+
+    const result = await lessonService.toggleFeaturedService({
+      lessonId,
+      userId,
+      isFeatured,
+    });
+
+    return res.status(200).json({
+      message: result.isFeatured
+        ? "Lesson featured successfully"
+        : "Lesson unfeatured successfully",
+      ...result,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      message:
+        status === 500 ? "Error toggling lesson featured flag" : error.message,
+      error: error.message,
+    });
+  }
+};
+
 const updateLessonController = async (req, res) => {
   try {
     const { id: lessonId } = req.params;
@@ -337,6 +376,7 @@ module.exports = {
   changeVisibilityController,
   changeAccessLevelController,
   setReviewStatusController,
+  toggleFeaturedController,
   updateLessonController,
   deleteLessonController,
 };

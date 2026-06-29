@@ -963,12 +963,20 @@ const updateLessonService = async ({ lessonId, userId, payload }) => {
 };
 
 /**
- * Deletes a lesson owned by `userId`.
+ * Deletes a lesson.
  *
- * - Requires both `lessonId` and `userId`.
- * - Enforces ownership: the caller's userId must match the lesson's
- *   stored userId, otherwise throws 403.
- * - Returns the deleted lessonId on success.
+ * Authorization:
+ *   - The lesson owner (the user whose `userId` is stored on the lesson)
+ *     can always delete their own lesson.
+ *   - An admin (a user whose `role` field is "admin" in the `user`
+ *     collection) can delete any lesson for moderation purposes.
+ *   - Any other caller is rejected with 403.
+ *
+ * The role lookup is done in a single extra `findOne` against the
+ * `user` collection. We skip that read when the caller is already the
+ * owner, so the common (non-admin) path stays at one query.
+ *
+ * Returns the deleted lessonId on success.
  *
  * Cascade behaviour (e.g. removing likes / saves / comments) is the
  * caller's responsibility — this service removes the lesson document only.
@@ -983,6 +991,7 @@ const deleteLessonService = async ({ lessonId, userId }) => {
 
   const db = client.db(DB_NAME);
   const lessons = db.collection(LESSONS_COLLECTION);
+  const users = db.collection(USERS_COLLECTION);
 
   const existing = await lessons.findOne(
     { _id: new ObjectId(lessonId) },
@@ -990,8 +999,30 @@ const deleteLessonService = async ({ lessonId, userId }) => {
   );
   if (!existing) throw httpError(404, "Lesson not found");
 
-  if (existing.userId?.toString() !== userId.toString()) {
-    throw httpError(403, "You are not allowed to delete this lesson");
+  const isOwner = existing.userId?.toString() === userId.toString();
+  if (!isOwner) {
+    // Owner check failed → verify the caller has the admin role before
+    // granting moderation rights. We accept both string and ObjectId
+    // `userId` storage shapes (the user collection is mixed in this
+    // codebase) and fall back to a plain equality lookup.
+    let caller = null;
+    if (ObjectId.isValid(userId)) {
+      caller = await users.findOne(
+        { _id: new ObjectId(userId) },
+        { projection: { role: 1 } },
+      );
+    } else {
+      caller = await users.findOne(
+        { _id: userId },
+        { projection: { role: 1 } },
+      );
+    }
+
+    const isAdmin =
+      caller && (caller.role || "").toString().toLowerCase() === "admin";
+    if (!isAdmin) {
+      throw httpError(403, "You are not allowed to delete this lesson");
+    }
   }
 
   const result = await lessons.deleteOne({ _id: new ObjectId(lessonId) });
@@ -1000,6 +1031,95 @@ const deleteLessonService = async ({ lessonId, userId }) => {
   }
 
   return { lessonId };
+};
+
+/**
+ * Toggles the `isFeatured` flag on a lesson (admin moderation).
+ *
+ * Authorization:
+ *   - The `userId` in the body is the calling admin's id. Server-side
+ *     admin role enforcement is intentionally not added here — the rest
+ *     of the admin write endpoints in this codebase rely on the same
+ *     pattern, with the frontend/proxy layer gating access to
+ *     /dashboard/admin/*. If a server-side admin check is added later,
+ *     mirror the plan-gate in `changeAccessLevelService`.
+ *
+ * Guardrails:
+ *   - A lesson whose `reviewStatus` is "rejected" cannot be featured.
+ *     Admins have to mark it "reviewed" first; we return 409 to signal
+ *     "conflict with current state" so the UI can show a clear toast.
+ *   - A "private" lesson cannot be featured either, mirroring the
+ *     visibility gate implied by the "rejected" cascade. The admin can
+ *     flip visibility to "public" from the same row, then feature.
+ *
+ * Response shape (matches the contract expected by the frontend
+ * `lib/actions/lessonActions.js` toggleLessonFeatured):
+ *   {
+ *     lessonId:   string,
+ *     isFeatured: boolean,   // post-toggle
+ *     changed:    boolean,
+ *   }
+ */
+const toggleFeaturedService = async ({ lessonId, userId, isFeatured }) => {
+  if (!lessonId) throw httpError(400, "lessonId is required");
+  if (!userId) throw httpError(400, "userId is required");
+
+  if (!ObjectId.isValid(lessonId)) {
+    throw httpError(400, "Invalid lessonId");
+  }
+
+  const lessons = client.db(DB_NAME).collection(LESSONS_COLLECTION);
+
+  const existing = await lessons.findOne(
+    { _id: new ObjectId(lessonId) },
+    { projection: { reviewStatus: 1, visibility: 1, isFeatured: 1 } },
+  );
+  if (!existing) throw httpError(404, "Lesson not found");
+
+  // Resolve the desired value. Accept an explicit `isFeatured` (admin
+  // picked an absolute state) or fall back to a true toggle.
+  const current = Boolean(existing.isFeatured);
+  const desired = typeof isFeatured === "boolean" ? isFeatured : !current;
+
+  // Guard: rejected lessons are never eligible to be featured.
+  if (desired === true) {
+    if ((existing.reviewStatus || "pending").toLowerCase() === "rejected") {
+      throw httpError(
+        409,
+        "Rejected lessons cannot be featured. Approve the lesson first.",
+      );
+    }
+    if ((existing.visibility || "public").toLowerCase() === "private") {
+      throw httpError(
+        409,
+        "Private lessons cannot be featured. Make it public first.",
+      );
+    }
+  }
+
+  // No-op when the requested state already matches storage.
+  if (current === desired) {
+    return {
+      lessonId: lessonId.toString(),
+      isFeatured: current,
+      changed: false,
+    };
+  }
+
+  const result = await lessons.findOneAndUpdate(
+    { _id: new ObjectId(lessonId) },
+    { $set: { isFeatured: desired, updatedAt: new Date() } },
+    { returnDocument: "after", projection: { isFeatured: 1 } },
+  );
+
+  const updated = result?.value ?? result;
+  if (!updated) throw httpError(404, "Lesson not found");
+
+  return {
+    lessonId: lessonId.toString(),
+    isFeatured: Boolean(updated.isFeatured),
+    changed: true,
+  };
 };
 
 const removeFavoriteLessonService = async (userId, lessonId) => {
@@ -1038,6 +1158,7 @@ module.exports = {
   changeVisibilityService,
   changeAccessLevelService,
   setReviewStatusService,
+  toggleFeaturedService,
   updateLessonService,
   deleteLessonService,
 };

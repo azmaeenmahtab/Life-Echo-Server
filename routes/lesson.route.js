@@ -31,6 +31,10 @@ router.patch(
   "/:id/review-status/change",
   lessonController.setReviewStatusController,
 );
+router.patch(
+  "/:id/featured/toggle",
+  lessonController.toggleFeaturedController,
+);
 router.put("/:id", lessonController.updateLessonController);
 router.delete("/:id", lessonController.deleteLessonController);
 
